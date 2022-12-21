@@ -39,7 +39,12 @@ service InfraAgent {
     rpc UpdateWireguardEndpoint(felix.WireguardEndpointUpdate) returns (Reply) {}
     rpc RemoveWireguardEndpoint(felix.WireguardEndpointRemove) returns (Reply) {}
     rpc UpdateGlobalBGPConfig(felix.GlobalBGPConfigUpdate) returns (Reply) {}
+    rpc IpamPoolUpdate(felix.IPAMPoolUpdate) returns (Reply) {}
+    rpc IpamPoolRemove(felix.IPAMPoolRemove) returns (Reply) {}
+    rpc InSync(Sync) returns (Reply) {}
 }
+
+message Sync {}
 
 message NatEndpoint {
     string ipv4_addr = 1;

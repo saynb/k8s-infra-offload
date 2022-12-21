@@ -136,6 +136,66 @@ func (mr *MockInfraAgentClientMockRecorder) DeleteNetwork(ctx, in interface{}, o
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteNetwork", reflect.TypeOf((*MockInfraAgentClient)(nil).DeleteNetwork), varargs...)
 }
 
+// InSync mocks base method.
+func (m *MockInfraAgentClient) InSync(ctx context.Context, in *proto.Sync, opts ...grpc.CallOption) (*proto.Reply, error) {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{ctx, in}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "InSync", varargs...)
+	ret0, _ := ret[0].(*proto.Reply)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// InSync indicates an expected call of InSync.
+func (mr *MockInfraAgentClientMockRecorder) InSync(ctx, in interface{}, opts ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{ctx, in}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InSync", reflect.TypeOf((*MockInfraAgentClient)(nil).InSync), varargs...)
+}
+
+// IpamPoolRemove mocks base method.
+func (m *MockInfraAgentClient) IpamPoolRemove(ctx context.Context, in *proto.IPAMPoolRemove, opts ...grpc.CallOption) (*proto.Reply, error) {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{ctx, in}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "IpamPoolRemove", varargs...)
+	ret0, _ := ret[0].(*proto.Reply)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// IpamPoolRemove indicates an expected call of IpamPoolRemove.
+func (mr *MockInfraAgentClientMockRecorder) IpamPoolRemove(ctx, in interface{}, opts ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{ctx, in}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IpamPoolRemove", reflect.TypeOf((*MockInfraAgentClient)(nil).IpamPoolRemove), varargs...)
+}
+
+// IpamPoolUpdate mocks base method.
+func (m *MockInfraAgentClient) IpamPoolUpdate(ctx context.Context, in *proto.IPAMPoolUpdate, opts ...grpc.CallOption) (*proto.Reply, error) {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{ctx, in}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "IpamPoolUpdate", varargs...)
+	ret0, _ := ret[0].(*proto.Reply)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// IpamPoolUpdate indicates an expected call of IpamPoolUpdate.
+func (mr *MockInfraAgentClientMockRecorder) IpamPoolUpdate(ctx, in interface{}, opts ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{ctx, in}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IpamPoolUpdate", reflect.TypeOf((*MockInfraAgentClient)(nil).IpamPoolUpdate), varargs...)
+}
+
 // NatTranslationAdd mocks base method.
 func (m *MockInfraAgentClient) NatTranslationAdd(ctx context.Context, in *proto.NatTranslation, opts ...grpc.CallOption) (*proto.Reply, error) {
 	m.ctrl.T.Helper()
@@ -752,6 +812,51 @@ func (m *MockInfraAgentServer) DeleteNetwork(arg0 context.Context, arg1 *proto.D
 func (mr *MockInfraAgentServerMockRecorder) DeleteNetwork(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteNetwork", reflect.TypeOf((*MockInfraAgentServer)(nil).DeleteNetwork), arg0, arg1)
+}
+
+// InSync mocks base method.
+func (m *MockInfraAgentServer) InSync(arg0 context.Context, arg1 *proto.Sync) (*proto.Reply, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "InSync", arg0, arg1)
+	ret0, _ := ret[0].(*proto.Reply)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// InSync indicates an expected call of InSync.
+func (mr *MockInfraAgentServerMockRecorder) InSync(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InSync", reflect.TypeOf((*MockInfraAgentServer)(nil).InSync), arg0, arg1)
+}
+
+// IpamPoolRemove mocks base method.
+func (m *MockInfraAgentServer) IpamPoolRemove(arg0 context.Context, arg1 *proto.IPAMPoolRemove) (*proto.Reply, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IpamPoolRemove", arg0, arg1)
+	ret0, _ := ret[0].(*proto.Reply)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// IpamPoolRemove indicates an expected call of IpamPoolRemove.
+func (mr *MockInfraAgentServerMockRecorder) IpamPoolRemove(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IpamPoolRemove", reflect.TypeOf((*MockInfraAgentServer)(nil).IpamPoolRemove), arg0, arg1)
+}
+
+// IpamPoolUpdate mocks base method.
+func (m *MockInfraAgentServer) IpamPoolUpdate(arg0 context.Context, arg1 *proto.IPAMPoolUpdate) (*proto.Reply, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IpamPoolUpdate", arg0, arg1)
+	ret0, _ := ret[0].(*proto.Reply)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// IpamPoolUpdate indicates an expected call of IpamPoolUpdate.
+func (mr *MockInfraAgentServerMockRecorder) IpamPoolUpdate(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IpamPoolUpdate", reflect.TypeOf((*MockInfraAgentServer)(nil).IpamPoolUpdate), arg0, arg1)
 }
 
 // NatTranslationAdd mocks base method.

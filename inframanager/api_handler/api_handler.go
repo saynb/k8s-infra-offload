@@ -772,6 +772,22 @@ func (s *ApiServer) UpdateGlobalBGPConfig(ctx context.Context, in *proto.GlobalB
 	return &proto.Reply{Successful: true}, nil
 }
 
+func (s *ApiServer) InSync(ctx context.Context, in *proto.Sync) (*proto.Reply, error) {
+	return &proto.Reply{Successful: true}, nil
+}
+
+func (s *ApiServer) IpamPoolUpdate(ctx context.Context, in *proto.IPAMPoolUpdate) (*proto.Reply, error) {
+	logger := log.WithField("func", "IPAMPoolUpdate")
+	logger.Infof("Incomming IPAMPoolUpdate request %+v", in)
+	return &proto.Reply{Successful: true}, nil
+}
+
+func (s *ApiServer) IpamPoolRemove(ctx context.Context, in *proto.IPAMPoolRemove) (*proto.Reply, error) {
+	logger := log.WithField("func", "IPAMPoolRemove")
+	logger.Infof("Incomming IPAMPoolRemove request %+v", in)
+	return &proto.Reply{Successful: true}, nil
+}
+
 func (s *ApiServer) SetupHostInterface(ctx context.Context, in *proto.SetupHostInterfaceRequest) (*proto.Reply, error) {
 	var err error
 
