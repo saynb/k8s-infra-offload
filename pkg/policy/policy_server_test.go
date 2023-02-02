@@ -18,6 +18,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 	"gopkg.in/tomb.v2"
 )
@@ -170,9 +171,12 @@ var _ = BeforeSuite(func() {
 		return mockClient
 	}
 
+	// grpcDial = func(target string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	// 	cc := &grpc.ClientConn{}
+	// 	return cc, nil
+	// }
 	grpcDial = func(target string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
-		cc := &grpc.ClientConn{}
-		return cc, nil
+		return grpc.DialContext(context.TODO(), "bufnet", grpc.WithContextDialer(bufDialer), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
 	cancellableListener = func(ctx context.Context) (net.Listener, error) {
@@ -454,6 +458,36 @@ var _ = Describe("policy", func() {
 			testPolicyMsg(bs, call)
 		})
 
+		var _ = It("return no error when handling InSync", func() {
+			msg := &proto.InSync{}
+			envelope, err := wrapPayloadWithEnvelope(msg, 0)
+			Expect(err).ShouldNot(HaveOccurred())
+			bs, err := envelope.Marshal()
+			Expect(err).ShouldNot(HaveOccurred())
+			call := mockClient.EXPECT().InSync(gomock.Any(), gomock.Any()).Times(1)
+			testPolicyMsg(bs, call)
+		})
+
+		var _ = It("return no error when handling IPAMPoolUpdate", func() {
+			msg := &proto.IPAMPoolUpdate{Id: "dummy"}
+			envelope, err := wrapPayloadWithEnvelope(msg, 0)
+			Expect(err).ShouldNot(HaveOccurred())
+			bs, err := envelope.Marshal()
+			Expect(err).ShouldNot(HaveOccurred())
+			call := mockClient.EXPECT().IpamPoolUpdate(gomock.Any(), gomock.Any()).Times(1)
+			testPolicyMsg(bs, call)
+		})
+
+		var _ = It("return no error when handling IPAMPoolUpdate", func() {
+			msg := &proto.IPAMPoolRemove{Id: "dummy"}
+			envelope, err := wrapPayloadWithEnvelope(msg, 0)
+			Expect(err).ShouldNot(HaveOccurred())
+			bs, err := envelope.Marshal()
+			Expect(err).ShouldNot(HaveOccurred())
+			call := mockClient.EXPECT().IpamPoolRemove(gomock.Any(), gomock.Any()).Times(1)
+			testPolicyMsg(bs, call)
+		})
+
 		var _ = It("return no error on not handled messages", func() {
 			var t tomb.Tomb
 			srv, err := NewPolicyServer(logrus.NewEntry(logrus.StandardLogger()))
@@ -481,33 +515,6 @@ var _ = Describe("policy", func() {
 			envelope, err := wrapPayloadWithEnvelope(config, 0)
 			Expect(err).ShouldNot(HaveOccurred())
 			bs, err := envelope.Marshal()
-			Expect(err).ShouldNot(HaveOccurred())
-			err = writeTo(conn, bs)
-			Expect(err).ShouldNot(HaveOccurred())
-
-			// write InSync
-			insync := &proto.InSync{}
-			envelope, err = wrapPayloadWithEnvelope(insync, 0)
-			Expect(err).ShouldNot(HaveOccurred())
-			bs, err = envelope.Marshal()
-			Expect(err).ShouldNot(HaveOccurred())
-			err = writeTo(conn, bs)
-			Expect(err).ShouldNot(HaveOccurred())
-
-			// write IpamPoolUpdate
-			ipamPoolUpdate := &proto.IPAMPoolUpdate{Id: "dummy", Pool: &proto.IPAMPool{Cidr: "1.2.3.4/24", Masquerade: false}}
-			envelope, err = wrapPayloadWithEnvelope(ipamPoolUpdate, 0)
-			Expect(err).ShouldNot(HaveOccurred())
-			bs, err = envelope.Marshal()
-			Expect(err).ShouldNot(HaveOccurred())
-			writeErr := writeTo(conn, bs)
-			Expect(writeErr).ShouldNot(HaveOccurred())
-
-			// write IpamPoolRemove
-			ipamPoolRemove := &proto.IPAMPoolRemove{Id: "dummy"}
-			envelope, err = wrapPayloadWithEnvelope(ipamPoolRemove, 0)
-			Expect(err).ShouldNot(HaveOccurred())
-			bs, err = envelope.Marshal()
 			Expect(err).ShouldNot(HaveOccurred())
 			err = writeTo(conn, bs)
 			Expect(err).ShouldNot(HaveOccurred())
