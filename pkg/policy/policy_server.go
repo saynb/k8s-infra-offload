@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"reflect"
 
 	"github.com/ipdk-io/k8s-infra-offload/pkg/types"
 	pb "github.com/ipdk-io/k8s-infra-offload/proto"
@@ -37,22 +36,11 @@ var (
 	removeSocket          = os.RemoveAll
 )
 
-type SyncState int
-
-const (
-	StateDisconnected SyncState = iota
-	StateConnected
-	StateSyncing
-	StateInSync
-)
-
 type PolicyServer struct {
 	log           *logrus.Entry
 	nextSeqNumber uint64
 	exiting       chan bool
 	name          string
-	policyState   *PolicyState
-	syncState     SyncState
 }
 
 func NewPolicyServer(log *logrus.Entry) (types.Server, error) {
@@ -60,9 +48,7 @@ func NewPolicyServer(log *logrus.Entry) (types.Server, error) {
 		log:           log,
 		nextSeqNumber: 0,
 		exiting:       make(chan bool),
-		name:          "felix-policy-server",
-		syncState:     StateDisconnected,
-		policyState:   NewPolicyState()}, nil
+		name:          "felix-policy-server"}, nil
 }
 
 func (s *PolicyServer) GetName() string {
@@ -77,28 +63,17 @@ func (s *PolicyServer) SyncPolicy(conn net.Conn) {
 			conn.Close()
 			return
 		}
-		s.log.Infof("Got message from felix %T", msg)
 		switch m := msg.(type) {
 		case *pb.ConfigUpdate:
 			err = s.handleConfigUpdate(m)
 		case *pb.InSync:
 			err = s.handleInSyc(m)
 		default:
-			// TODO @Abdul for what I saw in my test in-sync is received only onec, after initial handshake
-			// in our current solution does it make sense to store incomming request just to send them
-			// after receiving in-sync ?
-			var pending bool
-			if s.syncState == StateSyncing {
-				pending = true
-			} else if s.syncState == StateInSync {
-				pending = false
-			}
-			err = s.handleMessage(msg, pending)
+			err = s.handleMessage(msg, false)
 		}
 		if err != nil {
 			s.log.WithError(err).Warn("Error processing update from felix, restarting")
 			conn.Close()
-			s.syncState = StateDisconnected
 			return
 		}
 
@@ -171,26 +146,29 @@ func (s *PolicyServer) StopServer() {
 
 // Not needed?
 func (s *PolicyServer) handleConfigUpdate(msg *pb.ConfigUpdate) error {
-	s.log.Infof("Got config update %+v", msg)
-	s.syncState = StateSyncing
+	s.log.Infof("Received ConfigUpdate %+v", msg)
 	return nil
 }
 
 func (s *PolicyServer) handleInSyc(msg *pb.InSync) error {
-	s.log.Infof("Got in sync %+v", msg)
-	// TODO Abdul pending is now configured state in current solution what we should do ?
-	for m := range s.policyState.pendingState.Iterate() {
-		// we are in-sync send all messages
-		s.log.Infof("Will send %T", m)
-		if err := s.handleMessage(m, false); err != nil {
-			//TODO Abdul what to do here
-			s.log.WithError(err).Error("error occur while handling pending state")
-		}
+	s.log.Infof("Received InSync: %+v", msg)
+	out := &pb.Reply{
+		Successful: true,
 	}
-	// TODO Abdul after hendling s.policyState.configuredState == s.policyState.pendingState
-	// what to do next ?
-	s.policyState.pendingState = NewOrderedDict()
-	// after sendign all message send in sync
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process InSync: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.InSync(context.TODO(), &pb.Sync{})
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "error processing InSync with Infra Manager")
+	}
+	return nil
+}
+
+func (s *PolicyServer) handleIpsetUpdate(msg *pb.IPSetUpdate, pending bool) error {
+	s.log.Infof("Received IPSetUpdate %+v pending: %v", msg, pending)
 	out := &pb.Reply{
 		Successful: true,
 	}
@@ -198,343 +176,238 @@ func (s *PolicyServer) handleInSyc(msg *pb.InSync) error {
 	if err != nil {
 		return errors.Wrap(err, "cannot process handleIpsetUpdate: cannot dial manager")
 	}
-	out, err = c.InSync(context.TODO(), &pb.Sync{})
+	defer conn.Close()
+	out, err = c.UpdateIPSet(context.TODO(), msg)
 	if err != nil || !out.Successful {
-		return errors.Wrap(err, "cannot process handleInSync")
+		return errors.Wrap(err, "cannot process handleIpsetUpdate")
 	}
-	conn.Close()
-	s.syncState = StateInSync
-	return nil
-}
 
-func (s *PolicyServer) handleIpsetUpdate(msg *pb.IPSetUpdate, pending bool) error {
-	s.log.Infof("Got ipset update %+v pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id, msg)
-	} else {
-		configured := s.policyState.configuredState.Get(msg.Id)
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleIpsetUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.UpdateIPSet(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleIpsetUpdate")
-		}
-		s.policyState.configuredState.Set(msg.Id, msg)
-	}
 	return nil
 }
 
 func (s *PolicyServer) handleIpsetDeltaUpdate(msg *pb.IPSetDeltaUpdate, pending bool) error {
-	s.log.Infof("Got ipset delta update %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id, msg)
-	} else {
-		configured := s.policyState.configuredState.Get(msg.Id)
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleIpsetDeltaUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.UpdateIPSetDelta(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleIpsetDeltaUpdate")
-
-		}
-		s.policyState.configuredState.Set(msg.Id, msg)
+	s.log.Infof("Received IPSetDeltaUpdate: %+v, pending: %v", msg, pending)
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleIpsetDeltaUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.UpdateIPSetDelta(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleIpsetDeltaUpdate")
+
+	}
+
 	return nil
 }
 
 func (s *PolicyServer) handleIpsetRemove(msg *pb.IPSetRemove, pending bool) error {
-	s.log.Infof("Got ipset remove %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id, msg)
-	} else {
-		// TODO Abdul not sure is we should skip Remove so I leave it
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleIpsetRemove: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.RemoveIPSet(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleIpsetRemove")
-		}
-		s.policyState.configuredState.Set(msg.Id, msg)
+	s.log.Infof("Received IPSetRemove: %+v, pending: %v", msg, pending)
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleIpsetRemove: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.RemoveIPSet(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleIpsetRemove")
+	}
+
 	return nil
 }
 
 func (s *PolicyServer) handleActivePolicyUpdate(msg *pb.ActivePolicyUpdate, pending bool) error {
-	s.log.Infof("Got active police update %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		configured := s.policyState.configuredState.Get(msg.Id.String())
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleActivePolicyUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.ActivePolicyUpdate(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleActivePolicyUpdate")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	s.log.Infof("Received ActivePolicyUpdate: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleActivePolicyUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.ActivePolicyUpdate(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleActivePolicyUpdate")
+	}
+
 	return nil
 }
 
 func (s *PolicyServer) handleActivePolicyRemove(msg *pb.ActivePolicyRemove, pending bool) error {
-	s.log.Infof("Got active police remove %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleActivePolicyRemove: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.ActivePolicyRemove(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleActivePolicyRemove")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	s.log.Infof("Received ActivePolicyRemove: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleActivePolicyRemove: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.ActivePolicyRemove(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleActivePolicyRemove")
 	}
 
 	return nil
 }
 
 func (s *PolicyServer) handleActiveProfileUpdate(msg *pb.ActiveProfileUpdate, pending bool) error {
-	s.log.Infof("Got active profile update %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		configured := s.policyState.configuredState.Get(msg.Id.String())
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleActiveProfileUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.UpdateActiveProfile(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleActiveProfileUpdate")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	s.log.Infof("Received ActiveProfileUpdate %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleActiveProfileUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.UpdateActiveProfile(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleActiveProfileUpdate")
+	}
+
 	return nil
 }
 
 func (s *PolicyServer) handleActiveProfileRemove(msg *pb.ActiveProfileRemove, pending bool) error {
-	s.log.Infof("Got active profile remove %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleActiveProfileRemove: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.RemoveActiveProfile(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleActiveProfileRemove")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	s.log.Infof("Received ActiveProfileRemove: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleActiveProfileRemove: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.RemoveActiveProfile(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleActiveProfileRemove")
+	}
+
 	return nil
 }
 
 func (s *PolicyServer) handleHostEndpointUpdate(msg *pb.HostEndpointUpdate, pending bool) error {
-	s.log.Infof("Got host endpoint update %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		configured := s.policyState.configuredState.Get(msg.Id.String())
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleHostEndpointUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.UpdateHostEndpoint(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleHostEndpointUpdate")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	s.log.Infof("Received HostEndpointUpdate: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleHostEndpointUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.UpdateHostEndpoint(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleHostEndpointUpdate")
 	}
 
 	return nil
 }
 
 func (s *PolicyServer) handleHostEndpointRemove(msg *pb.HostEndpointRemove, pending bool) error {
-	s.log.Infof("Got host endpoint remove %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleHostEndpointRemove: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.RemoveHostEndpoint(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleHostEndpointRemove")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	s.log.Infof("Received HostEndpointRemove: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleHostEndpointRemove: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.RemoveHostEndpoint(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleHostEndpointRemove")
+	}
+
 	return nil
 }
 
 func (s *PolicyServer) handleWorkloadEndpointUpdate(msg *pb.WorkloadEndpointUpdate, pending bool) error {
-	s.log.Infof("Got workload endpoint update %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		configured := s.policyState.configuredState.Get(msg.Id.String())
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleWorkloadEndpointUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.UpdateLocalEndpoint(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleWorkloadEndpointUpdate")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	s.log.Infof("Received WorkloadEndpointUpdate: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleWorkloadEndpointUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.UpdateLocalEndpoint(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleWorkloadEndpointUpdate")
 	}
 
 	return nil
 }
 
 func (s *PolicyServer) handleWorkloadEndpointRemove(msg *pb.WorkloadEndpointRemove, pending bool) error {
-	s.log.Infof("Got workload endpoint remove %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleWorkloadEndpointRemove: cannot dial manager")
-		}
-		defer conn.Close()
+	s.log.Infof("Received WorkloadEndpointRemove: %+v, pending: %v", msg, pending)
 
-		out, err = c.RemoveLocalEndpoint(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleWorkloadEndpointRemove")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleWorkloadEndpointRemove: cannot dial manager")
+	}
+	defer conn.Close()
+
+	out, err = c.RemoveLocalEndpoint(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleWorkloadEndpointRemove")
+	}
+
 	return nil
 }
 
 func (s *PolicyServer) handleHostMetadataUpdate(msg *pb.HostMetadataUpdate, pending bool) error {
-	s.log.Infof("Got host metadata update %+v, pending %v", msg, pending)
-	id := "metadata" + msg.Hostname
-	if pending {
-		// message does not have ID fake it
-		s.policyState.pendingState.Set(id, msg)
-	} else {
-		configured := s.policyState.configuredState.Get(id)
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleHostMetadataUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.UpdateHostMetaData(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleHostMetadataUpdate")
-		}
-		s.policyState.configuredState.Set(id, msg)
+	s.log.Infof("Received HostMetadataUpdate: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleHostMetadataUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.UpdateHostMetaData(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleHostMetadataUpdate")
 	}
 
 	return nil
 }
 
 func (s *PolicyServer) handleHostMetadataRemove(msg *pb.HostMetadataRemove, pending bool) error {
-	s.log.Infof("Got host metadata remove %+v, pending %v", msg, pending)
-	id := "metadata" + msg.Hostname
-	if pending {
-		// message does not have ID fake it
-		s.policyState.pendingState.Set(id, msg)
-	} else {
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleHostMetadataRemove: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.RemoveHostMetaData(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleHostMetadataRemove")
-		}
-		s.policyState.configuredState.Set(id, msg)
+	s.log.Infof("Received HostMetadataRemove: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleHostMetadataRemove: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.RemoveHostMetaData(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleHostMetadataRemove")
 	}
 
 	return nil
@@ -542,283 +415,211 @@ func (s *PolicyServer) handleHostMetadataRemove(msg *pb.HostMetadataRemove, pend
 
 // Not needed?
 func (s *PolicyServer) handleIpamPoolUpdate(msg *pb.IPAMPoolUpdate, pending bool) error {
-	s.log.Infof("Got ipam pool update %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id, msg)
-	} else {
-		configured := s.policyState.configuredState.Get(msg.Id)
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleIpamPoolUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.IpamPoolUpdate(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleHostMetadataRemove")
-		}
-		s.policyState.configuredState.Set(msg.Id, msg)
+	s.log.Infof("Received IPAMPoolUpdate: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleIpamPoolUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.IpamPoolUpdate(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleHostMetadataRemove")
+	}
+
 	return nil
 }
 
 // Not needed?
 func (s *PolicyServer) handleIpamPoolRemove(msg *pb.IPAMPoolRemove, pending bool) error {
-	s.log.Infof("Got ipam pool remove %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id, msg)
-	} else {
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleIpamPoolUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.IpamPoolRemove(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleHostMetadataRemove")
-		}
-		s.policyState.configuredState.Set(msg.Id, msg)
+	s.log.Infof("Received IPAMPoolRemove: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleIpamPoolUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.IpamPoolRemove(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleHostMetadataRemove")
+	}
+
 	return nil
 }
 
 func (s *PolicyServer) handleServiceAccountUpdate(msg *pb.ServiceAccountUpdate, pending bool) error {
-	s.log.Infof("Got service account update %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		configured := s.policyState.configuredState.Get(msg.Id.String())
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleServiceAccountUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.UpdateServiceAccount(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleServiceAccountUpdate")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	s.log.Infof("Received ServiceAccountUpdate: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleServiceAccountUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.UpdateServiceAccount(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleServiceAccountUpdate")
 	}
 
 	return nil
 }
 
 func (s *PolicyServer) handleServiceAccountRemove(msg *pb.ServiceAccountRemove, pending bool) error {
-	s.log.Infof("Got service account remove %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleServiceAccountRemove: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.RemoveServiceAccount(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleServiceAccountRemove")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	s.log.Infof("Received ServiceAccountRemove: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleServiceAccountRemove: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.RemoveServiceAccount(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleServiceAccountRemove")
 	}
 
 	return nil
 }
 
 func (s *PolicyServer) handleNamespaceUpdate(msg *pb.NamespaceUpdate, pending bool) error {
-	s.log.Infof("Got namespace update %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		configured := s.policyState.configuredState.Get(msg.Id.String())
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleNamespaceUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.UpdateNamespace(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleNamespaceUpdate")
-		}
-		s.policyState.configuredState.Set(msg.GetId().String(), msg)
+	s.log.Infof("Received NamespaceUpdate: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleNamespaceUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.UpdateNamespace(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleNamespaceUpdate")
 	}
 
 	return nil
 }
 
 func (s *PolicyServer) handleNamespaceRemove(msg *pb.NamespaceRemove, pending bool) error {
-	s.log.Infof("Got namespace remove %+v, pending %v", msg, pending)
-	if pending {
-		s.policyState.pendingState.Set(msg.Id.String(), msg)
-	} else {
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleNamespaceRemove: cannot dial manager")
-		}
-		conn.Close()
-		out, err = c.RemoveNamespace(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleNamespaceRemove")
-		}
-		s.policyState.configuredState.Set(msg.Id.String(), msg)
+	s.log.Infof("Received NamespaceRemove: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleNamespaceRemove: cannot dial manager")
+	}
+	conn.Close()
+	out, err = c.RemoveNamespace(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleNamespaceRemove")
 	}
 
 	return nil
 }
 
 func (s *PolicyServer) handleRouteUpdate(msg *pb.RouteUpdate, pending bool) error {
-	s.log.Infof("Got route update %+v, pending %v", msg, pending)
-	id := "routeupdate" + msg.String()
-	if pending {
-		s.policyState.pendingState.Set(id, msg)
-	} else {
-		configured := s.policyState.configuredState.Get(id)
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleRouteUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.UpdateRoute(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleRouteUpdate")
-		}
-		s.policyState.configuredState.Set(id, msg)
+	s.log.Infof("Received RouteUpdate: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleRouteUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.UpdateRoute(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleRouteUpdate")
+	}
+
 	return nil
 }
 
 func (s *PolicyServer) handleRouteRemove(msg *pb.RouteRemove, pending bool) error {
-	s.log.Infof("Got route remove %+v, pending %v", msg, pending)
-	id := "routeremove" + msg.String()
-	if pending {
-		s.policyState.pendingState.Set(id, msg)
-	} else {
-		configured := s.policyState.configuredState.Get(id)
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleRouteRemove: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.RemoveRoute(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleRouteRemove")
-		}
-		s.policyState.configuredState.Set(id, msg)
+	s.log.Infof("Received RouteRemove: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
 	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleRouteRemove: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.RemoveRoute(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleRouteRemove")
+	}
+
 	return nil
 }
 
 func (s *PolicyServer) handleVXLANTunnelEndpointUpdate(msg *pb.VXLANTunnelEndpointUpdate, pending bool) error {
-	s.log.Infof("Got VXLAN tunnel endpoint update %+v, pending %v", msg, pending)
-	// it does not have id fake it
-	id := "vxlantunneladd-" + msg.String()
-	if pending {
-		s.policyState.pendingState.Set(id, msg)
-	} else {
-		configured := s.policyState.configuredState.Get(id)
-		if configured != nil && reflect.DeepEqual(configured, msg) {
-			//TODO Abdul update is not required return
-			return nil
-		}
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleVXLANTunnelEndpointUpdate: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.UpdateVXLANTunnelEndpoint(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleVXLANTunnelEndpointUpdate")
-		}
-		s.policyState.configuredState.Set(id, msg)
+	s.log.Infof("Received VXLANTunnelEndpointUpdate: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleVXLANTunnelEndpointUpdate: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.UpdateVXLANTunnelEndpoint(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleVXLANTunnelEndpointUpdate")
 	}
 
 	return nil
 }
 
 func (s *PolicyServer) handleVXLANTunnelEndpointRemove(msg *pb.VXLANTunnelEndpointRemove, pending bool) error {
-	s.log.Infof("Got VXLAN tunnel endpoint remove %+v, pending %v", msg, pending)
-	// it does not have id fake it
-	id := "vxlantunnelremove-" + msg.String()
-	if pending {
-		s.policyState.pendingState.Set(id, msg)
-	} else {
-		out := &pb.Reply{
-			Successful: true,
-		}
-		c, conn, err := s.dialManager()
-		if err != nil {
-			return errors.Wrap(err, "cannot process handleVXLANTunnelEndpointRemove: cannot dial manager")
-		}
-		defer conn.Close()
-		out, err = c.RemoveVXLANTunnelEndpoint(context.TODO(), msg)
-		if err != nil || !out.Successful {
-			return errors.Wrap(err, "cannot process handleVXLANTunnelEndpointRemove")
-		}
-		s.policyState.configuredState.Set(id, msg)
+	s.log.Infof("Received VXLANTunnelEndpointRemove: %+v, pending: %v", msg, pending)
+
+	out := &pb.Reply{
+		Successful: true,
+	}
+	c, conn, err := s.dialManager()
+	if err != nil {
+		return errors.Wrap(err, "cannot process handleVXLANTunnelEndpointRemove: cannot dial manager")
+	}
+	defer conn.Close()
+	out, err = c.RemoveVXLANTunnelEndpoint(context.TODO(), msg)
+	if err != nil || !out.Successful {
+		return errors.Wrap(err, "cannot process handleVXLANTunnelEndpointRemove")
 	}
 
 	return nil
 }
 
 func (s *PolicyServer) handleWireguardEndpointUpdate(msg *pb.WireguardEndpointUpdate, pending bool) error {
-	// TODO Abdul those are missing in protobuf I did not add them
-	s.log.Infof("Got Wireguard endpoint update %+v, pending %v", msg, pending)
+	// TODO: Not defined in proto for Agent-Manager communication
+	s.log.Infof("Received WireguardEndpointUpdate: %+v, pending: %v", msg, pending)
 	return nil
 }
 
 func (s *PolicyServer) handleWireguardEndpointRemove(msg *pb.WireguardEndpointRemove, pending bool) error {
-	// TODO Abdul those are missing in protobuf I did not add them
-	s.log.Infof("Got Wireguard endpoint remove %+v, pending %v", msg, pending)
+	// TODO: Not defined in proto for Agent-Manager communication
+	s.log.Infof("Received WireguardEndpointRemove: %+v, pending: %v", msg, pending)
 	return nil
 }
 
 func (s *PolicyServer) handleGlobalBGPConfigUpdate(msg *pb.GlobalBGPConfigUpdate, pending bool) error {
-	// TODO Abdul those are missing in protobuf I did not add them
-	s.log.Infof("Got GlobalBGPConfig update %+v, pending %v", msg, pending)
+	// TODO: Not defined in proto for Agent-Manager communication
+	s.log.Infof("Received GlobalBGPConfigUpdate: %+v, pending: %v", msg, pending)
 	return nil
 }
 
@@ -871,7 +672,6 @@ func (s *PolicyServer) Start(t *tomb.Tomb) error {
 					return
 				}
 			}
-			s.syncState = StateConnected
 			go s.SyncPolicy(conn)
 
 			s.log.Info("Waiting to close...")
